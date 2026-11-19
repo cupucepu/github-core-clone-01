@@ -237,7 +237,7 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
 
 // ---------------------------------------------------------------- packfiles
 
-/** Find the exact length of the zlib stream starting at `start` (inflateSync ignores trailing bytes). */
+/** Fallback for inflateAt: find the exact length of the zlib stream starting at `start` by probing. */
 function zlibStreamLength(buf: Buffer, start: number): number {
   let lo = 1;
   let hi = buf.length - start;
@@ -251,6 +251,31 @@ function zlibStreamLength(buf: Buffer, start: number): number {
     }
   }
   return lo;
+}
+
+/**
+ * Inflate one zlib stream starting at `start`; returns its bytes and the offset just past the
+ * stream. One inflate tells us both: with {info:true} Node reports engine.bytesWritten, the
+ * compressed bytes the stream consumed, so there is no need to probe for the stream's length.
+ * The old binary search re-inflated every object ~log2(n) times and threw on every short
+ * probe — exception throws are the slow part, and pack parsing was the push workload's main
+ * cost. Falls back to the probe when bytesWritten is unavailable, so behaviour is unchanged
+ * on a runtime that does not report it.
+ */
+function inflateAt(buf: Buffer, start: number): { data: Buffer; next: number } {
+  const view = buf.subarray(start);
+  try {
+    const result = inflateSync(view, { info: true }) as unknown as {
+      buffer: Buffer;
+      engine: { bytesWritten: number };
+    };
+    const written = result.engine?.bytesWritten;
+    if (written && written > 0) return { data: result.buffer, next: start + written };
+  } catch {
+    // fall through to the probe below
+  }
+  const streamLen = zlibStreamLength(buf, start);
+  return { data: inflateSync(buf.subarray(start, start + streamLen)), next: start + streamLen };
 }
 
 const PACK_TYPE_NAMES: Record<number, ObjectType> = {
@@ -307,9 +332,8 @@ export function parsePack(buf: Buffer): Array<GitObject & { oid: string }> {
       baseOid = buf.subarray(pos, pos + 20).toString('hex');
       pos += 20;
     }
-    const streamLen = zlibStreamLength(buf, pos);
-    const inflated = inflateSync(buf.subarray(pos, pos + streamLen));
-    pos += streamLen;
+    const { data: inflated, next } = inflateAt(buf, pos);
+    pos = next;
     if (inflated.length !== size) throw new Error('pack object size mismatch');
     let obj: GitObject;
     if (typeNum === 6 || typeNum === 7) {
