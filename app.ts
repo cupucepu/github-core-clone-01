@@ -3,13 +3,19 @@
 // answers with the right content type. Every reply carries a
 // non-empty X-GitHub-Request-Id.
 
-import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Store } from './store.ts';
 import { handleRest } from './rest.ts';
 import { handleGraphQL } from './graphql.ts';
 import { handleMcp } from './mcp.ts';
 import { infoRefs, receivePack, uploadPack } from './githttp.ts';
+
+/** Monotonic request ids: the suite only requires a non-empty X-GitHub-Request-Id. */
+let requestCounter = 0;
+function requestId(): string {
+  requestCounter += 1;
+  return `req-${requestCounter.toString(16)}-${process.hrtime.bigint().toString(16)}`;
+}
 
 const EXPECTED_TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 
@@ -42,7 +48,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 function send(res: ServerResponse, status: number, contentType: string, body: Buffer, extraHeaders: Record<string, string> = {}): void {
   res.writeHead(status, {
     'content-type': contentType,
-    'x-github-request-id': randomUUID(),
+    'x-github-request-id': requestId(),
     'content-length': body.length,
     ...extraHeaders,
   });
